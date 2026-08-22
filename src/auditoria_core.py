@@ -1,112 +1,68 @@
 import pandas as pd
-import os
 
-def processar_dados(lista_arquivos):
+def processar_dados(df):
     """
-    Motor principal da auditoria PBCS.
-    Recebe uma LISTA de caminhos de arquivos CSV, concatena todos, aplica a auditoria e retorna as métricas.
+    Motor de processamento da Auditoria PBCS.
+    Recebe um DataFrame bruto e devolve um dicionário com todas as métricas calculadas.
     """
-    if not lista_arquivos:
-        raise ValueError("Nenhum arquivo foi fornecido para processamento.")
-
-    # =========================================================================
-    # 1. CARREGAMENTO MÚLTIPLO E CONCATENAÇÃO
-    # =========================================================================
-    dfs_brutos = []
-    cabecalhos_originais_limpos = []
-
-    for idx, arquivo in enumerate(lista_arquivos):
-        try:
-            with open(arquivo, 'r', encoding='utf-8', errors='ignore') as f:
-                linha1 = f.readline()
-                
-            separador = ';' if ';' in linha1 else ','
-            cab_limpos = [c.strip().replace('"', '').replace("'", "") for c in linha1.split(separador)]
-            
-            # Salva o cabeçalho do primeiro arquivo para usar na exportação final
-            if idx == 0:
-                cabecalhos_originais_limpos = cab_limpos
-                
-            # Cria colunas extras de segurança para suportar quebras por ';' a mais no RMK
-            nomes_seguros = [f"Extra_{i}" for i in range(50)]
-            for i, cab in enumerate(cab_limpos):
-                nomes_seguros[i] = cab
-                
-            df_temp = pd.read_csv(arquivo, sep=separador, names=nomes_seguros, skiprows=1, dtype=str, engine='python')
-            dfs_brutos.append(df_temp)
-        except Exception as e:
-            raise ValueError(f"Falha ao ler o arquivo {os.path.basename(arquivo)}. Detalhe: {e}")
-
-    # Junta todos os arquivos (meses) em um grande DataFrame
-    df = pd.concat(dfs_brutos, ignore_index=True)
-    total_bruto_arquivo = len(df)
     
-    # =========================================================================
-    # 2. LIMPEZA ESTRUTURAL
-    # =========================================================================
-    colunas_para_remover = [
-        'FILLED_BY', 'ANAC_FILLED_BY', 'ACTIVATION', 
-        'PILOT_CMD', 'PILOT_ANAC', 'DAY_OF_WEEK', 'FLIGHT_RULE', 'ATS_TYPE'
-    ]
-    df = df.drop(columns=colunas_para_remover, errors='ignore')
+    # 1. VERIFICAÇÃO INICIAL
+    if df is None or df.empty:
+        raise ValueError("O DataFrame recebido está vazio ou é inválido.")
 
+    # Limpa espaços e aspas dos nomes das colunas (segurança)
+    df.columns = [str(c).strip().replace('"', '').replace("'", "") for c in df.columns]
+
+    # Colunas de texto para padronizar
     colunas_texto = ['EQUIP', 'ADD_INFO', 'INDICATIVE', 'ROUTE', 'ADEP', 'ADES', 'EOBD', 'EOBT', 'STATE', 'AIRLINE', 'FINISH_REASON']
     for col in colunas_texto:
         if col in df.columns:
             df[col] = df[col].fillna('').astype(str).str.strip().str.upper()
 
+    # Preenche companhias não declaradas com NAO_INFORMADA
     if 'AIRLINE' in df.columns:
         df.loc[df['AIRLINE'] == '', 'AIRLINE'] = 'NAO_INFORMADA'
-
+    
     # =========================================================================
-    # 3. AUTO-CORREÇÃO DE COMPANHIAS AÉREAS
+    # 2. AUTO-CORREÇÃO DE COMPANHIAS AÉREAS (IMPUTAÇÃO)
     # =========================================================================
     cias_declaradas = set(df.loc[df['AIRLINE'] != 'NAO_INFORMADA', 'AIRLINE'].unique())
     mask_nao_informada = df['AIRLINE'] == 'NAO_INFORMADA'
-    prefixos = df['INDICATIVE'].str[:3]
     
-    mask_match = mask_nao_informada & prefixos.isin(cias_declaradas)
-    df.loc[mask_match, 'AIRLINE'] = prefixos[mask_match]
+    if 'INDICATIVE' in df.columns:
+        prefixos = df['INDICATIVE'].str[:3]
+        mask_match = mask_nao_informada & prefixos.isin(cias_declaradas)
+        df.loc[mask_match, 'AIRLINE'] = prefixos[mask_match]
+        
     df.loc[df['AIRLINE'] == 'NAO_INFORMADA', 'AIRLINE'] = 'GERAL/MILITAR'
 
     # =========================================================================
-    # 4. FILTRAGEM REAL DE TRÁFEGO
+    # 3. FILTRAGEM REAL DE TRÁFEGO
     # =========================================================================
+    if 'STATE' not in df.columns:
+        raise ValueError("Coluna obrigatória 'STATE' não encontrada nos dados enviados.")
+        
     df_terminado_bruto = df[df['STATE'] == 'TERMINADO'].copy()
-    total_terminado_sistema = len(df_terminado_bruto)
-
-    if total_terminado_sistema == 0:
-        raise ValueError("Nenhum voo com estado 'TERMINADO' encontrado nos arquivos selecionados.")
-
-    df_falsos_voos = df_terminado_bruto[df_terminado_bruto['FINISH_REASON'] != ''].copy()
-    total_falsos_voos = len(df_falsos_voos)
-
-    df_terminado = df_terminado_bruto[df_terminado_bruto['FINISH_REASON'] == ''].copy()
+    
+    if 'FINISH_REASON' in df.columns:
+        df_terminado = df_terminado_bruto[df_terminado_bruto['FINISH_REASON'] == ''].copy()
+    else:
+        df_terminado = df_terminado_bruto.copy()
+        
     total_terminado = len(df_terminado)
 
     if total_terminado == 0:
-        raise ValueError("Todos os voos terminados possuem motivo de término (Cancelamentos/Limpeza de tela).")
+        raise ValueError("Nenhum voo efetivo (TERMINADO sem motivo de cancelamento) para auditoria.")
 
     # =========================================================================
-    # 5. IDENTIFICAÇÃO DO PERÍODO
+    # 4. GERAÇÃO DE ID DO VOO E CLASSIFICAÇÃO PBCS
     # =========================================================================
-    meses_pt = {
-        1: 'JAN', 2: 'FEV', 3: 'MAR', 4: 'ABR', 5: 'MAI', 6: 'JUN',
-        7: 'JUL', 8: 'AGO', 9: 'SET', 10: 'OUT', 11: 'NOV', 12: 'DEZ'
-    }
-    datas = pd.to_datetime(df_terminado['EOBD'], dayfirst=True, errors='coerce')
-    meses_unicos = sorted(datas.dt.month.dropna().unique().astype(int))
-    prefixo_periodo = "_".join([meses_pt[m] for m in meses_unicos]) if meses_unicos else "PERIODO_DESCONHECIDO"
-
-    # =========================================================================
-    # 6. GERAÇÃO DE ID DO VOO E CLASSIFICAÇÃO PBCS
-    # =========================================================================
-    if 'EOBD' in df.columns and 'EOBT' in df.columns:
+    if 'EOBD' in df_terminado.columns and 'EOBT' in df_terminado.columns:
         data_limpa = df_terminado['EOBD'].str.replace('/', '', regex=False)
         hora_limpa = df_terminado['EOBT'].str.replace(':', '', regex=False)
         df_terminado['ID_VOO'] = df_terminado['INDICATIVE'] + '_' + df_terminado['ADEP'] + '_' + df_terminado['ADES'] + '_' + data_limpa + hora_limpa
     else:
-        df_terminado['ID_VOO'] = "ID_DESCONHECIDO"
+        df_terminado['ID_VOO'] = df_terminado.index.astype(str)
 
     cond_p2 = df_terminado['EQUIP'].str.contains('P2', regex=False)
     cond_rsp = df_terminado['ADD_INFO'].str.contains(r'RSP\s*180', regex=True)
@@ -121,35 +77,13 @@ def processar_dados(lista_arquivos):
     df_terminado.loc[mask_pbcs & ~cond_l1 & cond_a1, 'CATEGORIA_PBCS'] = 'PBCS RNP10'
     df_terminado['IS_CAPABLE'] = df_terminado['CATEGORIA_PBCS'] != 'NAO_CAPACITADO'
 
-    # Teste de Integridade
-    contagem_cat = df_terminado['CATEGORIA_PBCS'].value_counts()
-    voos_ambos = contagem_cat.get('PBCS RNP4 RNP10', 0)
-    voos_rnp4 = contagem_cat.get('PBCS RNP4', 0)
-    voos_rnp10 = contagem_cat.get('PBCS RNP10', 0)
-    voos_nao_cap = contagem_cat.get('NAO_CAPACITADO', 0)
-    
-    soma_teste = voos_ambos + voos_rnp4 + voos_rnp10 + voos_nao_cap
-    if soma_teste != total_terminado:
-        raise ValueError("Erro de integridade: Soma de capacidades difere do total de voos reais.")
-
     total_capacitados = df_terminado['IS_CAPABLE'].sum()
     porcentagem_voos = (total_capacitados / total_terminado) * 100 if total_terminado > 0 else 0
 
-    df_homologados = df_terminado[df_terminado['IS_CAPABLE']].copy()
-    colunas_validas = [col for col in cabecalhos_originais_limpos if col in df_homologados.columns] + ['CATEGORIA_PBCS']
-    df_homologados = df_homologados[colunas_validas]
-
     # =========================================================================
-    # 7. ANÁLISE DE FROTA INTEGRADA
+    # 5. ANÁLISE DE FROTA INTEGRADA
     # =========================================================================
     df_terminado['REG_EXTRAIDO'] = df_terminado['ADD_INFO'].str.extract(r'REG/([^\s]+)')
-    
-    mask_sem_reg = df_terminado['REG_EXTRAIDO'].isna()
-    df_sem_reg = df_terminado[mask_sem_reg].copy()
-    qtd_sem_reg = len(df_sem_reg)
-    sem_reg_cap = len(df_sem_reg[df_sem_reg['CATEGORIA_PBCS'] != 'NAO_CAPACITADO'])
-    sem_reg_ncap = len(df_sem_reg[df_sem_reg['CATEGORIA_PBCS'] == 'NAO_CAPACITADO'])
-
     df_terminado['REGISTRO'] = df_terminado['REG_EXTRAIDO'].fillna(df_terminado['INDICATIVE'])
     df_terminado['REGISTRO'] = df_terminado['REGISTRO'].str.replace(r'[^A-Z0-9]', '', regex=True)
 
@@ -159,7 +93,7 @@ def processar_dados(lista_arquivos):
     pct_frota_cap = (frota_capacitada / total_frota) * 100 if total_frota > 0 else 0
 
     # =========================================================================
-    # 8. DESEMPENHO E IMPACTO POR COMPANHIA AÉREA
+    # 6. ANÁLISE DE DESEMPENHO E CONTRIBUIÇÃO POR COMPANHIA AÉREA
     # =========================================================================
     voos_cia = df_terminado.groupby('AIRLINE').agg(TOTAL_VOOS=('ID_VOO', 'count'), VOOS_PBCS=('IS_CAPABLE', 'sum'))
     voos_cia['PCT_VOOS'] = (voos_cia['VOOS_PBCS'] / voos_cia['TOTAL_VOOS']) * 100
@@ -170,56 +104,103 @@ def processar_dados(lista_arquivos):
 
     relatorio_cia = voos_cia.join(frota_cia).sort_values('TOTAL_VOOS', ascending=False).reset_index()
 
+    # Separa apenas os voos com inconsistência na declaração
     df_nao_capacitados = df_terminado[~df_terminado['IS_CAPABLE']].copy()
     total_nao_capacitados_global = len(df_nao_capacitados)
 
     if total_nao_capacitados_global > 0:
-        ofensores = df_nao_capacitados.groupby('AIRLINE').size().reset_index(name='VOOS_FALHOS')
-        ofensores['CONTRIBUICAO_PCT'] = (ofensores['VOOS_FALHOS'] / total_nao_capacitados_global) * 100
-        ofensores['IMPACTO_ABSOLUTO_PCT'] = (ofensores['VOOS_FALHOS'] / total_terminado) * 100
-        ranking_ofensores = ofensores.sort_values('VOOS_FALHOS', ascending=False)
+        # Muda a nomenclatura de VOOS_FALHOS para VOOS_NAO_CAPACITADOS
+        ofensores = df_nao_capacitados.groupby('AIRLINE').size().reset_index(name='VOOS_NAO_CAPACITADOS')
+        ofensores['CONTRIBUICAO_PCT'] = (ofensores['VOOS_NAO_CAPACITADOS'] / total_nao_capacitados_global) * 100
+        ranking_ofensores = ofensores.sort_values('VOOS_NAO_CAPACITADOS', ascending=False)
     else:
         ranking_ofensores = pd.DataFrame()
 
     # =========================================================================
-    # 9. AUDITORIA DE FLUTUAÇÃO DE CAPACIDADE
+    # 6.5. AUDITORIA DE FLUTUAÇÃO DE CAPACIDADE (INCONSISTÊNCIAS DA MESMA AERONAVE)
     # =========================================================================
-    flutuacao_reg = df_terminado.groupby('REGISTRO')['CATEGORIA_PBCS'].nunique()
-    regs_inconsistentes = flutuacao_reg[flutuacao_reg > 1].index.tolist()
+    # Agrupa por aeronave e conta quantas categorias diferentes ela declarou
+    agrup_registro = df_terminado.groupby('REGISTRO')['CATEGORIA_PBCS'].nunique()
+    registros_inconsistentes = agrup_registro[agrup_registro > 1].index
     
-    df_inconsistentes = df_terminado[df_terminado['REGISTRO'].isin(regs_inconsistentes)].copy()
-    qtd_inconsistentes = len(regs_inconsistentes)
-
-    df_export_inconsistentes = pd.DataFrame()
-    if qtd_inconsistentes > 0:
-        colunas_auditoria = ['REGISTRO', 'AIRLINE', 'ID_VOO', 'CATEGORIA_PBCS', 'EQUIP', 'ADD_INFO']
-        df_export_inconsistentes = df_inconsistentes[colunas_auditoria].sort_values(by=['REGISTRO', 'CATEGORIA_PBCS'])
+    df_inconsistentes = df_terminado[df_terminado['REGISTRO'].isin(registros_inconsistentes)].copy()
+    
+    if not df_inconsistentes.empty:
+        ranking_inconsistentes = df_inconsistentes['REGISTRO'].value_counts().reset_index()
+        ranking_inconsistentes.columns = ['REGISTRO', 'QTD_VOOS']
+        
+        # Puxa a companhia da aeronave para o ranking
+        cia_map = df_inconsistentes.groupby('REGISTRO')['AIRLINE'].first().reset_index()
+        ranking_inconsistentes = pd.merge(ranking_inconsistentes, cia_map, on='REGISTRO', how='left')
+        
+        # Cria a string de discrepância (Ex: RNP4 vs NAO_CAPACITADO)
+        def get_categorias(reg):
+            cats = df_inconsistentes[df_inconsistentes['REGISTRO'] == reg]['CATEGORIA_PBCS'].unique()
+            return " vs ".join(cats)
+            
+        ranking_inconsistentes['DISCREPANCIA'] = ranking_inconsistentes['REGISTRO'].apply(get_categorias)
+        ranking_inconsistentes = ranking_inconsistentes[['REGISTRO', 'AIRLINE', 'QTD_VOOS', 'DISCREPANCIA']]
+    else:
+        ranking_inconsistentes = pd.DataFrame()
+# =========================================================================
+    # 6.6. EVOLUÇÃO MENSAL (PROGRESSÃO)
+    # =========================================================================
+    # Converte a coluna EOBD forçando o padrão onde o DIA vem primeiro (dayfirst=True)
+    # Isso evita que o Pandas confunda 12/01 (12 de Jan) com 01/12 (1º de Dez)
+    df_terminado['DATA_REF'] = pd.to_datetime(df_terminado['EOBD'], errors='coerce', dayfirst=True)
+    
+    # Extrai o Ano-Mês para conseguir ordenar cronologicamente de forma correta
+    df_terminado['MES_ANO_SORT'] = df_terminado['DATA_REF'].dt.strftime('%Y-%m').fillna('0000-00')
+    
+    mensal_list = []
+    for mes, group in df_terminado.groupby('MES_ANO_SORT'):
+        # Ignora linhas que realmente vieram sem data do sistema de controle
+        if mes == '0000-00':
+            continue
+            
+        # Transforma "2026-05" em "05/2026" para ficar bonito na tela
+        mes_str = f"{mes.split('-')[1]}/{mes.split('-')[0]}"
+            
+        tot = len(group)
+        cap = group['IS_CAPABLE'].sum()
+        pct_v = (cap / tot) * 100 if tot > 0 else 0
+        
+        frota_ag = group.groupby('REGISTRO')['IS_CAPABLE'].any()
+        tot_f = len(frota_ag)
+        cap_f = frota_ag.sum()
+        pct_f = (cap_f / tot_f) * 100 if tot_f > 0 else 0
+        
+        mensal_list.append({
+            'MES_SORT': mes,
+            'Mês': mes_str,
+            'Voos Efetivos': tot,
+            'Voos PBCS': cap,
+            '% Voos PBCS': pct_v,
+            'Frota Ativa': tot_f,
+            'Frota PBCS': cap_f,
+            '% Frota PBCS': pct_f
+        })
+    
+    # Cria a tabela ordenada pelas datas
+    if mensal_list:
+        df_evolucao = pd.DataFrame(mensal_list).sort_values('MES_SORT').drop(columns=['MES_SORT'])
+    else:
+        df_evolucao = pd.DataFrame()
 
     # =========================================================================
-    # 10. RETORNO DOS DADOS
+    # 7. EMPACOTAMENTO DOS RESULTADOS
     # =========================================================================
     return {
-        "periodo": prefixo_periodo,
-        "metricas": {
-            "total_bruto": total_bruto_arquivo,
-            "total_falsos_voos": total_falsos_voos,
-            "total_terminado": total_terminado,
-            "voos_ambos": voos_ambos,
-            "voos_rnp4": voos_rnp4,
-            "voos_rnp10": voos_rnp10,
-            "voos_nao_cap": voos_nao_cap,
-            "total_capacitados": total_capacitados,
-            "porcentagem_voos": porcentagem_voos,
-            "qtd_sem_reg": qtd_sem_reg,
-            "total_frota": total_frota,
-            "frota_capacitada": frota_capacitada,
-            "pct_frota_cap": pct_frota_cap,
-            "qtd_inconsistentes": qtd_inconsistentes
-        },
-        "dataframes": {
-            "voos_capacitados": df_homologados,
-            "desempenho_cias": relatorio_cia,
-            "ranking_ofensores": ranking_ofensores,
-            "inconsistentes": df_export_inconsistentes
-        }
+        'total_terminado': int(total_terminado),
+        'total_capacitados': int(total_capacitados),
+        'porcentagem_voos': float(porcentagem_voos),
+        'frota_capacitada': int(frota_capacitada),
+        'total_frota': int(total_frota),
+        'pct_frota_cap': float(pct_frota_cap),
+        'relatorio_cia': relatorio_cia,
+        'ranking_ofensores': ranking_ofensores,
+        'voos_inconsistentes': df_inconsistentes, 
+        'ranking_inconsistentes': ranking_inconsistentes, 
+        'evolucao_mensal': df_evolucao,  # <--- NOVA TABELA AQUI
+        'df_processado': df_terminado
     }

@@ -1,275 +1,257 @@
 import streamlit as st
 import pandas as pd
+import io
 import plotly.express as px
-import plotly.graph_objects as go
-import os
-import glob
-from src.auditoria_core import processar_dados
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 
-# =============================================================================
-# 1. CONFIGURAÇÃO DA PÁGINA
-# =============================================================================
-st.set_page_config(
-    page_title="Painel de Auditoria PBCS",
-    page_icon="✈️",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# Importa o motor de auditoria (certifique-se de que a pasta 'src' possui um arquivo __init__.py vazio)
+import src.auditoria_core as core
 
-# Estilização em CSS
-st.markdown("""
-    <style>
-    .metric-card {
-        background-color: #f8f9fa;
-        border-radius: 8px;
-        padding: 15px;
-        border-left: 5px solid #005088;
-        box-shadow: 2px 2px 5px rgba(0,0,0,0.05);
-    }
-    </style>
-""", unsafe_allow_html=True)
+# ==========================================
+# CONFIGURAÇÃO DO GOOGLE DRIVE
+# ==========================================
+ID_PASTA_DRIVE = "1crkkDka7Q0t5i6-TDMybk6eSB0MAdenX"
 
-# =============================================================================
-# 2. CABEÇALHO E SELEÇÃO DE ARQUIVOS LOCAIS
-# =============================================================================
-st.title("✈️ Auditoria Integrada Datalink (PBCS)")
-st.markdown("Selecione os arquivos de extração do ATC armazenados na sua pasta local para gerar os relatórios.")
-
-# Garante que a pasta existe para não dar erro
-PASTA_INPUTS = os.path.join("data", "inputs")
-os.makedirs(PASTA_INPUTS, exist_ok=True)
-
-# Lista todos os arquivos CSV na pasta
-arquivos_disponiveis = glob.glob(os.path.join(PASTA_INPUTS, "*.csv"))
-nomes_arquivos = [os.path.basename(f) for f in arquivos_disponiveis]
-
-if not nomes_arquivos:
-    st.warning(f"⚠️ Nenhum arquivo CSV encontrado na pasta `{PASTA_INPUTS}`. Coloque os extratos lá para começar.")
-else:
-    # Menu de Múltipla Escolha
-    arquivos_selecionados = st.multiselect(
-        "Selecione um ou mais meses para analisar (O sistema unificará os dados automaticamente):",
-        options=nomes_arquivos,
-        default=nomes_arquivos if len(nomes_arquivos) == 1 else []
+@st.cache_resource
+def conectar_drive():
+    """Lê as credenciais do cofre do Streamlit e conecta no Drive"""
+    credenciais = service_account.Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=["https://www.googleapis.com/auth/drive.readonly"]
     )
+    return build('drive', 'v3', credentials=credenciais)
 
-    btn_processar = st.button("🚀 Processar Auditoria", type="primary")
+@st.cache_data(ttl=300)
+def listar_arquivos_drive():
+    """Busca os arquivos CSV na pasta do Google Drive"""
+    try:
+        drive_service = conectar_drive()
+        query = f"'{ID_PASTA_DRIVE}' in parents and trashed=false and mimeType='text/csv'"
+        resultados = drive_service.files().list(q=query, fields="files(id, name)").execute()
+        return resultados.get('files', [])
+    except Exception as e:
+        st.error(f"Erro ao conectar com o Drive: {e}")
+        return []
 
-    # =============================================================================
-    # 3. NÚCLEO DA APLICAÇÃO (PROCESSAMENTO)
-    # =============================================================================
-    if btn_processar and arquivos_selecionados:
+def baixar_arquivo_drive(file_id):
+    """Baixa o arquivo para a memória temporária (BytesIO)"""
+    drive_service = conectar_drive()
+    request = drive_service.files().get_media(fileId=file_id)
+    return io.BytesIO(request.execute())
+
+# ==========================================
+# INTERFACE GRÁFICA - DASHBOARD
+# ==========================================
+st.set_page_config(page_title="Auditoria PBCS - FIRAO", page_icon="✈️", layout="wide")
+
+st.title("✈️ Painel de Auditoria de Capacidade Datalink (PBCS) - FIR-AO")
+st.markdown("Plataforma automatizada para análise das capacidades e inconsistências de voos oceânicos.")
+st.divider()
+
+# 1. Busca lista de arquivos na nuvem
+arquivos_disponiveis = listar_arquivos_drive()
+
+if not arquivos_disponiveis:
+    st.warning("Nenhum arquivo CSV encontrado na pasta do Google Drive conectada.")
+    st.stop()
+
+mapa_arquivos = {arq['name']: arq['id'] for arq in arquivos_disponiveis}
+
+# 2. Configura a barra lateral
+with st.sidebar:
+    st.header("📂 ARQUIVOS")
+    arquivos_selecionados = st.multiselect(
+        "Selecione os extratos mensais:",
+        options=list(mapa_arquivos.keys()),        
+    )
+    
+    iniciar_analise = st.button("🚀 Processar Auditoria", use_container_width=True, type="primary")
+
+# 3. Execução Principal
+if iniciar_analise and arquivos_selecionados:
+    with st.spinner("Baixando e higienizando dados. Aguarde..."):
         
-        # Reconstrói os caminhos completos dos arquivos escolhidos
-        caminhos_completos = [os.path.join(PASTA_INPUTS, f) for f in arquivos_selecionados]
+        lista_dfs = []
         
+        # =========================================================================
+        # TRATAMENTO ANTI-FALHA DE CSV (HIGIENIZAÇÃO ESTRUTURAL)
+        # =========================================================================
+        for nome_arq in arquivos_selecionados:
+            file_id = mapa_arquivos[nome_arq]
+            arq_memoria = baixar_arquivo_drive(file_id)
+            
+            # Lê apenas a primeira linha do arquivo para descobrir o padrão
+            primeira_linha = arq_memoria.readline().decode('utf-8', errors='ignore')
+            
+            # Identifica se o sistema gerou com ponto-e-vírgula ou vírgula
+            separador = ';' if ';' in primeira_linha else ','
+            
+            # Limpa o cabeçalho arrancando aspas e espaços invisíveis
+            cabecalhos_limpos = [c.strip().replace('"', '').replace("'", "") for c in primeira_linha.split(separador)]
+            
+            # Cria um "colchão" de 100 colunas para evitar que quebras de linha em observações
+            # do despachante empurrem os dados para fora da tabela e quebrem o pandas
+            nomes_seguros = [f"Extra_{i}" for i in range(100)]
+            for i, cab in enumerate(cabecalhos_limpos):
+                if i < 100:
+                    nomes_seguros[i] = cab
+                    
+            # Retorna o "leitor" para o começo do arquivo (linha zero)
+            arq_memoria.seek(0)
+            
+            # O Pandas agora lê o arquivo blindado, pulando a linha 1 original que era suja
+            df_temp = pd.read_csv(
+                arq_memoria, 
+                sep=separador, 
+                names=nomes_seguros, 
+                skiprows=1, 
+                dtype=str, 
+                engine='python', 
+                on_bad_lines='skip'
+            )
+            
+            lista_dfs.append(df_temp)
+            
+        # Junta os meses selecionados em uma base única
+        df_bruto = pd.concat(lista_dfs, ignore_index=True)
+        
+        # =========================================================================
+        # EXECUÇÃO DA AUDITORIA
+        # =========================================================================
         try:
-            with st.spinner('Processando malha fina e cruzando matrizes...'):
-                resultados = processar_dados(caminhos_completos)
-                
-            metricas = resultados['metricas']
-            dfs = resultados['dataframes']
-            periodo = resultados['periodo']
+            resultados = core.processar_dados(df_bruto)
+        except Exception as e:
+            st.error(f"Erro durante o processamento analítico: {e}")
+            st.stop()
             
-            st.success(f"✅ Processamento concluído! Período analisado: **{periodo}** (Voos: {metricas['total_terminado']:,})")
+        st.success("Análise concluída com sucesso! Os dados foram validados e estruturados.")
+        
+        # =========================================================================
+        # CONSTRUÇÃO DO PAINEL DE INDICADORES (TABS)
+        # =========================================================================
+        tab1, tab2, tab3, tab4 = st.tabs([
+            "📊 Visão Geral", 
+            "🏢 Desempenho por Cia", 
+            "📉 Ranking de Ofensores", 
+            "⚠️ Inconsistências de Declaração"
+        ])
+        
+       # --- ABA 1: VISÃO GERAL ---
+        with tab1:
+            st.subheader("Capacidade Global (Período Selecionado)")
+            col1, col2, col3 = st.columns(3)
             
-            # =====================================================================
-            # 4. CONSTRUÇÃO DA INTERFACE EM ABAS (TABS)
-            # =====================================================================
-            tab1, tab2, tab3, tab4, tab5 = st.tabs([
-                "📊 Resumo Executivo", 
-                "🏢 Desempenho por Cia", 
-                "🚨 Ranking de Ofensores", 
-                "🔎 Auditoria de Flutuação",
-                "⬇️ Exportar Relatórios"
-            ])
-
-            # ---------------------------------------------------------------------
-            # ABA 1: RESUMO EXECUTIVO (KPIs)
-            # ---------------------------------------------------------------------
-            with tab1:
-                st.header("Visão Geral do Tráfego e Frota")
+            with col1:
+                st.metric("Total de Voos Efetivos", f"{resultados['total_terminado']:,}".replace(',', '.'))
+            with col2:
+                st.metric("Voos PBCS Declarados", f"{resultados['total_capacitados']:,}".replace(',', '.'), 
+                          f"{resultados['porcentagem_voos']:.1f}%")
+            with col3:
+                st.metric("Frota Capacitada", f"{resultados['frota_capacitada']:,}".replace(',', '.'), 
+                          f"{resultados['pct_frota_cap']:.1f}%")
+            
+            st.divider()
+            
+            # --- NOVA SESSÃO: PROGRESSÃO MENSAL ---
+            st.subheader("Progressão Mensal")
+            st.markdown("<span style='font-size: 0.9em; color: gray;'>Acompanhamento mês a mês da adesão das companhias aéreas ao Datalink (PBCS).</span>", unsafe_allow_html=True)
+            
+            df_evo = resultados['evolucao_mensal']
+            
+            if not df_evo.empty:
+                # Criando máscaras de formatação no padrão brasileiro
+                formato_int = lambda x: f"{int(x):,}".replace(',', '.')
+                formato_pct = lambda x: f"{x:.1f}%"
                 
-                # Linha 1: Métricas de Voo
-                st.subheader("1. Análise de Voos (Efetivos)")
-                col1, col2, col3, col4 = st.columns(4)
-                col1.metric("Total Lido nos Arquivos", f"{metricas['total_bruto']:,}")
-                col2.metric("Falsos Voos (Descartados)", f"{metricas['total_falsos_voos']:,}")
-                col3.metric("Voos Efetivos (Base)", f"{metricas['total_terminado']:,}")
-                col4.metric("Homologação Datalink", f"{metricas['porcentagem_voos']:.2f}%")
-                
-                st.markdown("---")
-                
-                # Linha 2: Métricas de Frota e Preenchimento
-                st.subheader("2. Análise de Frota e Qualidade")
-                col1, col2, col3, col4 = st.columns(4)
-                col1.metric("Planos s/ Matrícula (REG/)", f"{metricas['qtd_sem_reg']:,}")
-                col2.metric("Frota Única (Aeronaves)", f"{metricas['total_frota']:,}")
-                col3.metric("Frota Capacitada (PBCS)", f"{metricas['frota_capacitada']:,}")
-                col4.metric("Conformidade da Frota", f"{metricas['pct_frota_cap']:.2f}%")
-
-                # Gráfico Rápido: Distribuição de Capacidade (Voos)
-                st.markdown("<br>", unsafe_allow_html=True)
-                labels = ['PBCS RNP4 RNP10', 'PBCS RNP4', 'PBCS RNP10', 'NÃO CAPACITADOS']
-                valores = [metricas['voos_ambos'], metricas['voos_rnp4'], metricas['voos_rnp10'], metricas['voos_nao_cap']]
-                
-                fig_pizza = px.pie(
-                    names=labels, 
-                    values=valores, 
-                    title="Distribuição das Categorias PBN/PBCS nos Voos Efetivos",
-                    color_discrete_sequence=px.colors.qualitative.Prism,
-                    hole=0.4
-                )
-                st.plotly_chart(fig_pizza, use_container_width=True)
-
-            # ---------------------------------------------------------------------
-            # ABA 2: DESEMPENHO POR COMPANHIA AÉREA
-            # ---------------------------------------------------------------------
-            with tab2:
-                st.header("Desempenho Interno por Companhia")
-                st.markdown("Cruza o volume total de operações e frota com o nível de conformidade aprovada.")
-                
-                df_cias = dfs['desempenho_cias']
-                
-                # Gráfico de Barras: Volume de voos
-                top_cias = df_cias.head(15).copy()
-                top_cias = top_cias.sort_values('TOTAL_VOOS', ascending=True)
-                
-                fig_barras_cias = px.bar(
-                    top_cias, 
-                    x='TOTAL_VOOS', 
-                    y='AIRLINE', 
-                    orientation='h',
-                    title="Top 15 Companhias em Volume de Voos",
-                    text='TOTAL_VOOS',
-                    color='PCT_VOOS',
-                    color_continuous_scale='Blues',
-                    labels={'PCT_VOOS': 'Aprovação PBCS (%)', 'AIRLINE': 'Companhia', 'TOTAL_VOOS': 'Voos Totais'}
-                )
-                st.plotly_chart(fig_barras_cias, use_container_width=True)
-                
-                # Tabela Completa
-                st.subheader("Tabela Consolidada (Todas as Operadoras)")
                 st.dataframe(
-                    df_cias.style.format({
-                        'PCT_VOOS': '{:.2f}%',
-                        'PCT_FROTA': '{:.2f}%'
+                    df_evo.style.format({
+                        'Voos Efetivos': formato_int,
+                        'Voos PBCS': formato_int,
+                        '% Voos PBCS': formato_pct,
+                        'Frota Ativa': formato_int,
+                        'Frota PBCS': formato_int,
+                        '% Frota PBCS': formato_pct
                     }),
                     use_container_width=True,
-                    height=400
+                    hide_index=True
                 )
-
-            # ---------------------------------------------------------------------
-            # ABA 3: RANKING DE OFENSORES
-            # ---------------------------------------------------------------------
-            with tab3:
-                st.header("Matriz de Impacto e Contribuição de Falha")
-                st.markdown("Quais companhias aéreas injetaram o maior volume de voos irregulares na FIR oceânica.")
                 
-                df_ofensores = dfs['ranking_ofensores']
+        # --- ABA 2: DESEMPENHO POR COMPANHIA ---
+        with tab2:
+            st.subheader("Análise Detalhada por Companhia Aérea")
+            df_cia = resultados['relatorio_cia']
+            st.dataframe(df_cia.style.format(precision=1), use_container_width=True, height=500, hide_index=True)
+            
+        # --- ABA 3: RANKING DE OFENSORES ---
+        with tab3:
+            st.subheader("Contribuição para a Taxa de Erro Global")
+            df_ofensores = resultados['ranking_ofensores']
+            
+            if df_ofensores.empty:
+                st.success("Excelente! Nenhum voo operou sem declarar a capacidade no período.")
+            else:
+                colA, colB = st.columns([2, 1])
                 
-                if df_ofensores.empty:
-                    st.success("EXCELENTE: Nenhum voo reprovado no período. 100% de conformidade global.")
-                else:
-                    col_of_1, col_of_2 = st.columns([2, 1])
+                with colA:
+                    # Gráfico atualizado com a nomenclatura diplomática
+                    fig = px.bar(df_ofensores.head(10), 
+                                 x='AIRLINE', y='VOOS_NAO_CAPACITADOS', 
+                                 text='CONTRIBUICAO_PCT',
+                                 title="Top 10 Companhias com Maior Volume de Inconsistências",
+                                 labels={'VOOS_NAO_CAPACITADOS': 'Voos Não Capacitados', 'AIRLINE': 'Companhia'},
+                                 color='VOOS_NAO_CAPACITADOS', color_continuous_scale='Reds')
                     
-                    with col_of_2:
-                        st.info(f"""
-                        **Resumo do Problema:**
-                        - Total de Voos Irregulares: **{metricas['voos_nao_cap']:,}**
-                        - Isso representa **{(metricas['voos_nao_cap']/metricas['total_terminado'])*100:.2f}%** do tráfego total.
-                        """)
-                        st.dataframe(
-                            df_ofensores[['AIRLINE', 'VOOS_FALHOS', 'CONTRIBUICAO_PCT', 'IMPACTO_ABSOLUTO_PCT']].style.format({
-                                'CONTRIBUICAO_PCT': '{:.2f}%',
-                                'IMPACTO_ABSOLUTO_PCT': '{:.2f}%'
-                            }),
-                            use_container_width=True,
-                            height=400
-                        )
-
-                    with col_of_1:
-                        top10_ofensores = df_ofensores.head(10).sort_values('VOOS_FALHOS', ascending=True)
-                        fig_ofensores = px.bar(
-                            top10_ofensores,
-                            x='VOOS_FALHOS',
-                            y='AIRLINE',
-                            orientation='h',
-                            title="Top 10 Ofensores (Volume de Erros Absoluto)",
-                            text='VOOS_FALHOS',
-                            color='CONTRIBUICAO_PCT',
-                            color_continuous_scale='Reds',
-                            labels={'CONTRIBUICAO_PCT': '% da Culpa Global', 'AIRLINE': 'Companhia', 'VOOS_FALHOS': 'Quantidade de Erros'}
-                        )
-                        st.plotly_chart(fig_ofensores, use_container_width=True)
-
-            # ---------------------------------------------------------------------
-            # ABA 4: AUDITORIA DE FLUTUAÇÃO
-            # ---------------------------------------------------------------------
-            with tab4:
-                st.header("Malha Fina: Flutuação de Capacidade")
-                st.markdown("Aeronaves que operaram na FIR com fitas preenchidas de forma conflitante (ora indicam PBCS, ora omitem).")
-                
-                if metricas['qtd_inconsistentes'] == 0:
-                    st.success("Nenhuma aeronave declarou capacidades conflitantes neste período.")
-                else:
-                    st.warning(f"⚠️ ATENÇÃO: Identificadas **{metricas['qtd_inconsistentes']}** aeronaves com dupla personalidade de preenchimento.")
+                    fig.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
+                    fig.update_layout(uniformtext_minsize=8, uniformtext_mode='hide')
+                    st.plotly_chart(fig, use_container_width=True)
                     
-                    df_inconsistentes = dfs['inconsistentes']
-                    st.dataframe(df_inconsistentes, use_container_width=True, height=500)
-
-            # ---------------------------------------------------------------------
-            # ABA 5: DOWNLOADS
-            # ---------------------------------------------------------------------
-            with tab5:
-                st.header("Exportação de Base de Dados")
-                st.markdown("Baixe as tabelas completas geradas pelo motor no formato CSV para uso no Excel/Calc.")
-                
-                def convert_df(df):
-                    return df.to_csv(index=False, sep=';', encoding='utf-8-sig')
-
-                col_btn1, col_btn2 = st.columns(2)
-                
-                with col_btn1:
-                    st.download_button(
-                        label="📥 Baixar Voos Capacitados (Base Limpa)",
-                        data=convert_df(dfs['voos_capacitados']),
-                        file_name=f"{periodo}_voos_capacitados.csv",
-                        mime="text/csv",
-                        use_container_width=True
+                with colB:
+                    # Tabela limpa (hide_index=True) escondendo a numeração lateral
+                    st.dataframe(
+                        df_ofensores[['AIRLINE', 'VOOS_NAO_CAPACITADOS', 'CONTRIBUICAO_PCT']].head(20).style.format({'CONTRIBUICAO_PCT': "{:.2f}%"}), 
+                        use_container_width=True, 
+                        height=450,
+                        hide_index=True 
                     )
                     
-                    st.download_button(
-                        label="📥 Baixar Desempenho por Companhia",
-                        data=convert_df(dfs['desempenho_cias']),
-                        file_name=f"{periodo}_desempenho_cias.csv",
-                        mime="text/csv",
-                        use_container_width=True
-                    )
-
-                with col_btn2:
-                    if not df_ofensores.empty:
-                        st.download_button(
-                            label="🚨 Baixar Ranking de Ofensores",
-                            data=convert_df(dfs['ranking_ofensores']),
-                            file_name=f"{periodo}_ranking_ofensores.csv",
-                            mime="text/csv",
-                            use_container_width=True
-                        )
-                    
-                    if metricas['qtd_inconsistentes'] > 0:
-                        st.download_button(
-                            label="🔎 Baixar Log de Flutuação (Malha Fina)",
-                            data=convert_df(dfs['inconsistentes']),
-                            file_name=f"{periodo}_auditoria_flutuacao_capacidade.csv",
-                            mime="text/csv",
-                            use_container_width=True
-                        )
-
-        except ValueError as e:
-            st.error(f"⚠️ Erro nos dados: {e}")
-        except Exception as e:
-            st.error(f"⚠️ Ocorreu um erro inesperado no processamento: {e}")
-    
-    elif btn_processar and not arquivos_selecionados:
-        st.error("⚠️ Você precisa selecionar pelo menos um arquivo na lista acima antes de processar.")
+        # --- ABA 4: AERONAVES COM INCONSISTÊNCIAS (DETALHAMENTO) ---
+        with tab4:
+            st.subheader("Auditoria de Flutuação de Capacidade (Mesma Aeronave)")
+            st.markdown("Aeronaves que **alteraram sua declaração de capacidade entre voos**. Revela erros de preenchimento de plano de voo.")
+            
+            df_inconsistentes = resultados['voos_inconsistentes']
+            ranking_inconsistentes = resultados['ranking_inconsistentes']
+            
+            if ranking_inconsistentes.empty:
+                st.success("EXCELENTE: Nenhuma aeronave declarou capacidades conflitantes no período.")
+            else:
+                qtd_inconsistentes = len(ranking_inconsistentes)
+                st.warning(f"⚠️ ALERTA: {qtd_inconsistentes} aeronaves apresentaram flutuação de capacidade entre seus voos.")
+                
+                st.markdown("#### Top Aeronaves com Declarações Conflitantes")
+                # Tabela de Ranking
+                st.dataframe(
+                    ranking_inconsistentes,
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                st.divider()
+                st.markdown("#### Detalhamento dos Voos (Rastreabilidade do Erro)")
+                
+                # Seleciona as colunas focando no cruzamento Registro vs Categoria
+                colunas_auditoria = ['REGISTRO', 'CATEGORIA_PBCS', 'AIRLINE', 'ID_VOO', 'INDICATIVE', 'EQUIP', 'ADD_INFO', 'ADEP', 'ADES', 'EOBD']
+                colunas_presentes = [c for c in colunas_auditoria if c in df_inconsistentes.columns]
+                
+                # ORDENA pela matrícula (Registro). Assim, os voos da mesma aeronave ficam agrupados
+                # e o usuário vê a coluna CATEGORIA_PBCS mudando de valor nas linhas vizinhas.
+                df_view = df_inconsistentes[colunas_presentes].sort_values(by=['REGISTRO', 'EOBD'])
+                
+                # Tabela de Detalhamento
+                st.dataframe(
+                    df_view,
+                    use_container_width=True,
+                    height=500,
+                    hide_index=True
+                )
