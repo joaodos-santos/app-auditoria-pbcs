@@ -45,7 +45,7 @@ def baixar_arquivo_drive(file_id):
 # ==========================================
 st.set_page_config(page_title="Auditoria PBCS - FIRAO", page_icon="✈️", layout="wide")
 
-st.title("✈️ Painel de Auditoria de Capacidade Datalink (PBCS) - FIR-AO")
+st.title("✈️ Painel de Auditoria de Capacidades Datalink (PBCS) - FIR-AO")
 st.markdown("Plataforma automatizada para análise das capacidades e inconsistências de voos oceânicos.")
 st.divider()
 
@@ -137,19 +137,25 @@ if iniciar_analise and arquivos_selecionados:
             "⚠️ Inconsistências de Declaração"
         ])
         
-       # --- ABA 1: VISÃO GERAL ---
+      # --- ABA 1: VISÃO GERAL ---
         with tab1:
-            st.subheader("Capacidade Global (Período Selecionado)")
+            st.subheader("Capacidades Globais (Período Selecionado)")
             col1, col2, col3 = st.columns(3)
             
             with col1:
                 st.metric("Total de Voos Efetivos", f"{resultados['total_terminado']:,}".replace(',', '.'))
+            
             with col2:
-                st.metric("Voos PBCS Declarados", f"{resultados['total_capacitados']:,}".replace(',', '.'), 
-                          f"{resultados['porcentagem_voos']:.1f}%")
+                voos_fmt = f"{resultados['total_capacitados']:,}".replace(',', '.')
+                pct_voos = f"{resultados['porcentagem_voos']:.1f}%"
+                # Coloca a porcentagem ao lado do número, sem gerar a seta
+                st.metric("Voos PBCS Declarados", f"{voos_fmt} ({pct_voos})")
+                
             with col3:
-                st.metric("Frota Capacitada", f"{resultados['frota_capacitada']:,}".replace(',', '.'), 
-                          f"{resultados['pct_frota_cap']:.1f}%")
+                frota_fmt = f"{resultados['frota_capacitada']:,}".replace(',', '.')
+                pct_frota = f"{resultados['pct_frota_cap']:.1f}%"
+                # Coloca a porcentagem ao lado do número, sem gerar a seta
+                st.metric("Frota Capacitada", f"{frota_fmt} ({pct_frota})")
             
             st.divider()
             
@@ -217,8 +223,8 @@ if iniciar_analise and arquivos_selecionados:
                     
         # --- ABA 4: AERONAVES COM INCONSISTÊNCIAS (DETALHAMENTO) ---
         with tab4:
-            st.subheader("Auditoria de Flutuação de Capacidade (Mesma Aeronave)")
-            st.markdown("Aeronaves que **alteraram sua declaração de capacidade entre voos**. Revela erros de preenchimento de plano de voo.")
+            st.subheader("Auditoria de Flutuação de Capacidades (Mesma Aeronave)")
+            st.markdown("Aeronaves que **alteraram sua declaração de capacidades entre voos**. Revela erros de preenchimento de plano de voo.")
             
             df_inconsistentes = resultados['voos_inconsistentes']
             ranking_inconsistentes = resultados['ranking_inconsistentes']
