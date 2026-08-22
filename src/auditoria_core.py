@@ -1,37 +1,49 @@
 import pandas as pd
-import io
+import os
 
-def processar_dados(arquivo_csv):
+def processar_dados(lista_arquivos):
     """
     Motor principal da auditoria PBCS.
-    Recebe um arquivo (do Streamlit ou disco) e retorna um dicionário com métricas e DataFrames.
+    Recebe uma LISTA de caminhos de arquivos CSV, concatena todos, aplica a auditoria e retorna as métricas.
     """
+    if not lista_arquivos:
+        raise ValueError("Nenhum arquivo foi fornecido para processamento.")
+
     # =========================================================================
-    # 1. CARREGAMENTO E LIMPEZA ESTRUTURAL
+    # 1. CARREGAMENTO MÚLTIPLO E CONCATENAÇÃO
     # =========================================================================
-    try:
-        # Se for um arquivo upado via Streamlit, ele vem como BytesIO
-        if hasattr(arquivo_csv, 'read'):
-            linha1 = arquivo_csv.readline().decode('utf-8', errors='ignore')
-            arquivo_csv.seek(0) # Volta o ponteiro para o início para o pandas ler tudo
-        else:
-            # Fallback caso rode apontando um caminho no disco
-            with open(arquivo_csv, 'r', encoding='utf-8', errors='ignore') as f:
+    dfs_brutos = []
+    cabecalhos_originais_limpos = []
+
+    for idx, arquivo in enumerate(lista_arquivos):
+        try:
+            with open(arquivo, 'r', encoding='utf-8', errors='ignore') as f:
                 linha1 = f.readline()
                 
-        separador = ';' if ';' in linha1 else ','
-        cabecalhos_limpos = [c.strip().replace('"', '').replace("'", "") for c in linha1.split(separador)]
-        
-        nomes_seguros = [f"Extra_{i}" for i in range(50)]
-        for i, cab in enumerate(cabecalhos_limpos):
-            nomes_seguros[i] = cab
+            separador = ';' if ';' in linha1 else ','
+            cab_limpos = [c.strip().replace('"', '').replace("'", "") for c in linha1.split(separador)]
             
-        df = pd.read_csv(arquivo_csv, sep=separador, names=nomes_seguros, skiprows=1, dtype=str, engine='python')
-    except Exception as e:
-        raise ValueError(f"Falha ao ler o arquivo CSV. Verifique o formato. Detalhe: {e}")
+            # Salva o cabeçalho do primeiro arquivo para usar na exportação final
+            if idx == 0:
+                cabecalhos_originais_limpos = cab_limpos
+                
+            # Cria colunas extras de segurança para suportar quebras por ';' a mais no RMK
+            nomes_seguros = [f"Extra_{i}" for i in range(50)]
+            for i, cab in enumerate(cab_limpos):
+                nomes_seguros[i] = cab
+                
+            df_temp = pd.read_csv(arquivo, sep=separador, names=nomes_seguros, skiprows=1, dtype=str, engine='python')
+            dfs_brutos.append(df_temp)
+        except Exception as e:
+            raise ValueError(f"Falha ao ler o arquivo {os.path.basename(arquivo)}. Detalhe: {e}")
 
+    # Junta todos os arquivos (meses) em um grande DataFrame
+    df = pd.concat(dfs_brutos, ignore_index=True)
     total_bruto_arquivo = len(df)
     
+    # =========================================================================
+    # 2. LIMPEZA ESTRUTURAL
+    # =========================================================================
     colunas_para_remover = [
         'FILLED_BY', 'ANAC_FILLED_BY', 'ACTIVATION', 
         'PILOT_CMD', 'PILOT_ANAC', 'DAY_OF_WEEK', 'FLIGHT_RULE', 'ATS_TYPE'
@@ -47,7 +59,7 @@ def processar_dados(arquivo_csv):
         df.loc[df['AIRLINE'] == '', 'AIRLINE'] = 'NAO_INFORMADA'
 
     # =========================================================================
-    # 2. AUTO-CORREÇÃO DE COMPANHIAS AÉREAS
+    # 3. AUTO-CORREÇÃO DE COMPANHIAS AÉREAS
     # =========================================================================
     cias_declaradas = set(df.loc[df['AIRLINE'] != 'NAO_INFORMADA', 'AIRLINE'].unique())
     mask_nao_informada = df['AIRLINE'] == 'NAO_INFORMADA'
@@ -58,13 +70,13 @@ def processar_dados(arquivo_csv):
     df.loc[df['AIRLINE'] == 'NAO_INFORMADA', 'AIRLINE'] = 'GERAL/MILITAR'
 
     # =========================================================================
-    # 3. FILTRAGEM REAL DE TRÁFEGO
+    # 4. FILTRAGEM REAL DE TRÁFEGO
     # =========================================================================
     df_terminado_bruto = df[df['STATE'] == 'TERMINADO'].copy()
     total_terminado_sistema = len(df_terminado_bruto)
 
     if total_terminado_sistema == 0:
-        raise ValueError("Nenhum voo com estado 'TERMINADO' encontrado no arquivo.")
+        raise ValueError("Nenhum voo com estado 'TERMINADO' encontrado nos arquivos selecionados.")
 
     df_falsos_voos = df_terminado_bruto[df_terminado_bruto['FINISH_REASON'] != ''].copy()
     total_falsos_voos = len(df_falsos_voos)
@@ -73,10 +85,10 @@ def processar_dados(arquivo_csv):
     total_terminado = len(df_terminado)
 
     if total_terminado == 0:
-        raise ValueError("Todos os voos terminados possuem motivo de término. Nenhum voo efetivo para auditoria.")
+        raise ValueError("Todos os voos terminados possuem motivo de término (Cancelamentos/Limpeza de tela).")
 
     # =========================================================================
-    # 4. IDENTIFICAÇÃO DO PERÍODO
+    # 5. IDENTIFICAÇÃO DO PERÍODO
     # =========================================================================
     meses_pt = {
         1: 'JAN', 2: 'FEV', 3: 'MAR', 4: 'ABR', 5: 'MAI', 6: 'JUN',
@@ -87,7 +99,7 @@ def processar_dados(arquivo_csv):
     prefixo_periodo = "_".join([meses_pt[m] for m in meses_unicos]) if meses_unicos else "PERIODO_DESCONHECIDO"
 
     # =========================================================================
-    # 5. GERAÇÃO DE ID DO VOO E CLASSIFICAÇÃO PBCS
+    # 6. GERAÇÃO DE ID DO VOO E CLASSIFICAÇÃO PBCS
     # =========================================================================
     if 'EOBD' in df.columns and 'EOBT' in df.columns:
         data_limpa = df_terminado['EOBD'].str.replace('/', '', regex=False)
@@ -118,17 +130,17 @@ def processar_dados(arquivo_csv):
     
     soma_teste = voos_ambos + voos_rnp4 + voos_rnp10 + voos_nao_cap
     if soma_teste != total_terminado:
-        raise ValueError(f"Erro de integridade: Soma de capacidades ({soma_teste}) difere do total de voos reais ({total_terminado}).")
+        raise ValueError("Erro de integridade: Soma de capacidades difere do total de voos reais.")
 
     total_capacitados = df_terminado['IS_CAPABLE'].sum()
     porcentagem_voos = (total_capacitados / total_terminado) * 100 if total_terminado > 0 else 0
 
     df_homologados = df_terminado[df_terminado['IS_CAPABLE']].copy()
-    colunas_validas = [col for col in cabecalhos_limpos if col in df_homologados.columns] + ['CATEGORIA_PBCS']
+    colunas_validas = [col for col in cabecalhos_originais_limpos if col in df_homologados.columns] + ['CATEGORIA_PBCS']
     df_homologados = df_homologados[colunas_validas]
 
     # =========================================================================
-    # 6. ANÁLISE DE FROTA INTEGRADA
+    # 7. ANÁLISE DE FROTA INTEGRADA
     # =========================================================================
     df_terminado['REG_EXTRAIDO'] = df_terminado['ADD_INFO'].str.extract(r'REG/([^\s]+)')
     
@@ -147,7 +159,7 @@ def processar_dados(arquivo_csv):
     pct_frota_cap = (frota_capacitada / total_frota) * 100 if total_frota > 0 else 0
 
     # =========================================================================
-    # 7. ANÁLISE DE DESEMPENHO E RANKING
+    # 8. DESEMPENHO E IMPACTO POR COMPANHIA AÉREA
     # =========================================================================
     voos_cia = df_terminado.groupby('AIRLINE').agg(TOTAL_VOOS=('ID_VOO', 'count'), VOOS_PBCS=('IS_CAPABLE', 'sum'))
     voos_cia['PCT_VOOS'] = (voos_cia['VOOS_PBCS'] / voos_cia['TOTAL_VOOS']) * 100
@@ -156,7 +168,6 @@ def processar_dados(arquivo_csv):
     frota_cia = frota_cia_reg.groupby('AIRLINE').agg(TOTAL_FROTA=('REGISTRO', 'nunique'), FROTA_PBCS=('IS_CAPABLE', 'sum'))
     frota_cia['PCT_FROTA'] = (frota_cia['FROTA_PBCS'] / frota_cia['TOTAL_FROTA']) * 100
 
-    # Reseta o index para que 'AIRLINE' vire uma coluna normal para ser plotada no Streamlit
     relatorio_cia = voos_cia.join(frota_cia).sort_values('TOTAL_VOOS', ascending=False).reset_index()
 
     df_nao_capacitados = df_terminado[~df_terminado['IS_CAPABLE']].copy()
@@ -171,7 +182,7 @@ def processar_dados(arquivo_csv):
         ranking_ofensores = pd.DataFrame()
 
     # =========================================================================
-    # 8. AUDITORIA DE FLUTUAÇÃO DE CAPACIDADE
+    # 9. AUDITORIA DE FLUTUAÇÃO DE CAPACIDADE
     # =========================================================================
     flutuacao_reg = df_terminado.groupby('REGISTRO')['CATEGORIA_PBCS'].nunique()
     regs_inconsistentes = flutuacao_reg[flutuacao_reg > 1].index.tolist()
@@ -185,7 +196,7 @@ def processar_dados(arquivo_csv):
         df_export_inconsistentes = df_inconsistentes[colunas_auditoria].sort_values(by=['REGISTRO', 'CATEGORIA_PBCS'])
 
     # =========================================================================
-    # 9. EMPACOTAMENTO DOS DADOS PARA A INTERFACE GRÁFICA
+    # 10. RETORNO DOS DADOS
     # =========================================================================
     return {
         "periodo": prefixo_periodo,
@@ -200,13 +211,10 @@ def processar_dados(arquivo_csv):
             "total_capacitados": total_capacitados,
             "porcentagem_voos": porcentagem_voos,
             "qtd_sem_reg": qtd_sem_reg,
-            "sem_reg_cap": sem_reg_cap,
-            "sem_reg_ncap": sem_reg_ncap,
             "total_frota": total_frota,
             "frota_capacitada": frota_capacitada,
             "pct_frota_cap": pct_frota_cap,
-            "qtd_inconsistentes": qtd_inconsistentes,
-            "falsos_voos_top": df_falsos_voos['FINISH_REASON'].value_counts().head(3).to_dict() if total_falsos_voos > 0 else {}
+            "qtd_inconsistentes": qtd_inconsistentes
         },
         "dataframes": {
             "voos_capacitados": df_homologados,
