@@ -119,19 +119,24 @@ def processar_dados(df):
     # =========================================================================
     # 6.5. AUDITORIA DE FLUTUAÇÃO DE CAPACIDADE (INCONSISTÊNCIAS DA MESMA AERONAVE)
     # =========================================================================
-    # Agrupa por aeronave e conta quantas categorias diferentes ela declarou
-    agrup_registro = df_terminado.groupby('REGISTRO')['CATEGORIA_PBCS'].nunique()
-    registros_inconsistentes = agrup_registro[agrup_registro > 1].index
+    # Agrupa por aeronave e checa se ela oscilou entre ser capacitada (True) e não capacitada (False)
+    agrup_cap = df_terminado.groupby('REGISTRO')['IS_CAPABLE'].nunique()
+    
+    # Filtra apenas matrículas que tiveram MAIS DE UM status (ou seja, declarou sim em uns, não em outros)
+    registros_inconsistentes = agrup_cap[agrup_cap > 1].index
     
     df_inconsistentes = df_terminado[df_terminado['REGISTRO'].isin(registros_inconsistentes)].copy()
     
     if not df_inconsistentes.empty:
-        ranking_inconsistentes = df_inconsistentes['REGISTRO'].value_counts().reset_index()
-        ranking_inconsistentes.columns = ['REGISTRO', 'QTD_VOOS']
+        # Conta as ocorrências de declaração positiva e negativa
+        resumo_inconsist = df_inconsistentes.groupby('REGISTRO').agg(
+            VOOS_DECLARADOS=('IS_CAPABLE', 'sum'), # Conta os 'True'
+            VOOS_NAO_DECLARADOS=('IS_CAPABLE', lambda x: (~x).sum()) # Conta os 'False'
+        ).reset_index()
         
         # Puxa a companhia da aeronave para o ranking
         cia_map = df_inconsistentes.groupby('REGISTRO')['AIRLINE'].first().reset_index()
-        ranking_inconsistentes = pd.merge(ranking_inconsistentes, cia_map, on='REGISTRO', how='left')
+        ranking_inconsistentes = pd.merge(resumo_inconsist, cia_map, on='REGISTRO', how='left')
         
         # Cria a string de discrepância (Ex: RNP4 vs NAO_CAPACITADO)
         def get_categorias(reg):
@@ -139,7 +144,12 @@ def processar_dados(df):
             return " vs ".join(cats)
             
         ranking_inconsistentes['DISCREPANCIA'] = ranking_inconsistentes['REGISTRO'].apply(get_categorias)
-        ranking_inconsistentes = ranking_inconsistentes[['REGISTRO', 'AIRLINE', 'QTD_VOOS', 'DISCREPANCIA']]
+        
+        # ORDENAÇÃO INTELIGENTE: Pelo maior número de OMISSÕES (voos não declarados)
+        ranking_inconsistentes = ranking_inconsistentes.sort_values('VOOS_NAO_DECLARADOS', ascending=False)
+        
+        # Reorganiza as colunas para exibição na tela
+        ranking_inconsistentes = ranking_inconsistentes[['REGISTRO', 'AIRLINE', 'VOOS_DECLARADOS', 'VOOS_NAO_DECLARADOS', 'DISCREPANCIA']]
     else:
         ranking_inconsistentes = pd.DataFrame()
 # =========================================================================
