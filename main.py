@@ -133,7 +133,7 @@ if iniciar_analise and arquivos_selecionados:
         tab1, tab2, tab3, tab4 = st.tabs([
             "📊 Visão Geral", 
             "🏢 Desempenho por Cia", 
-            "📉 Ranking de Ofensores", 
+            "📉 Ranking de Não Capacitadas", 
             "⚠️ Inconsistências de Declaração"
         ])
         
