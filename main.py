@@ -66,7 +66,8 @@ with st.sidebar:
         options=list(mapa_arquivos.keys()),        
     )
     
-    iniciar_analise = st.button("🚀 Processar Auditoria", use_container_width=True, type="primary")
+    # Atualizado para width='stretch'
+    iniciar_analise = st.button("🚀 Processar Auditoria", width='stretch', type="primary")
 
 # 3. Execução Principal
 if iniciar_analise and arquivos_selecionados:
@@ -170,6 +171,7 @@ if iniciar_analise and arquivos_selecionados:
                 formato_int = lambda x: f"{int(x):,}".replace(',', '.')
                 formato_pct = lambda x: f"{x:.1f}%"
                 
+                # Atualizado para width='stretch'
                 st.dataframe(
                     df_evo.style.format({
                         'Voos Efetivos': formato_int,
@@ -179,17 +181,17 @@ if iniciar_analise and arquivos_selecionados:
                         'Frota PBCS': formato_int,
                         '% Frota PBCS': formato_pct
                     }),
-                    use_container_width=True,
+                    width='stretch',
                     hide_index=True
                 )
                 
         # --- ABA 2: DESEMPENHO POR COMPANHIA ---
         with tab2:
             st.subheader("Análise Detalhada por Companhia Aérea")
-            df_cia = resultados['relatorio_cia']
-            st.dataframe(df_cia.style.format(precision=1), use_container_width=True, height=500, hide_index=True)
+            # Atualizado para width='stretch'
+            st.dataframe(df_cia.style.format(precision=1), width='stretch', height=500, hide_index=True)
             
-        # --- ABA 3: RANKING DE OFENSORES ---
+        # --- ABA 3: RANKING DE NÃO CAPACITADAS ---
         with tab3:
             st.subheader("Contribuição para a Taxa de Erro Global")
             df_ofensores = resultados['ranking_ofensores']
@@ -200,7 +202,6 @@ if iniciar_analise and arquivos_selecionados:
                 colA, colB = st.columns([2, 1])
                 
                 with colA:
-                    # Gráfico atualizado com a nomenclatura diplomática
                     fig = px.bar(df_ofensores.head(10), 
                                  x='AIRLINE', y='VOOS_NAO_CAPACITADOS', 
                                  text='CONTRIBUICAO_PCT',
@@ -210,13 +211,13 @@ if iniciar_analise and arquivos_selecionados:
                     
                     fig.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
                     fig.update_layout(uniformtext_minsize=8, uniformtext_mode='hide')
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True) # Mantido conforme padrão de gráficos plotly no Streamlit
                     
                 with colB:
-                    # Tabela limpa (hide_index=True) escondendo a numeração lateral
+                    # Atualizado para width='stretch'
                     st.dataframe(
                         df_ofensores[['AIRLINE', 'VOOS_NAO_CAPACITADOS', 'CONTRIBUICAO_PCT']].head(20).style.format({'CONTRIBUICAO_PCT': "{:.2f}%"}), 
-                        use_container_width=True, 
+                        width='stretch', 
                         height=450,
                         hide_index=True 
                     )
@@ -236,28 +237,25 @@ if iniciar_analise and arquivos_selecionados:
                 st.warning(f"⚠️ ALERTA: {qtd_inconsistentes} aeronaves apresentaram flutuação de capacidade entre seus voos.")
                 
                 st.markdown("#### Top Aeronaves com Declarações Conflitantes")
-                # Tabela de Ranking
+                # Atualizado para width='stretch'
                 st.dataframe(
                     ranking_inconsistentes,
-                    use_container_width=True,
+                    width='stretch',
                     hide_index=True
                 )
                 
                 st.divider()
                 st.markdown("#### Detalhamento dos Voos (Rastreabilidade do Erro)")
                 
-                # Seleciona as colunas focando no cruzamento Registro vs Categoria
                 colunas_auditoria = ['REGISTRO', 'CATEGORIA_PBCS', 'AIRLINE', 'ID_VOO', 'INDICATIVE', 'EQUIP', 'ADD_INFO', 'ADEP', 'ADES', 'EOBD']
                 colunas_presentes = [c for c in colunas_auditoria if c in df_inconsistentes.columns]
                 
-                # ORDENA pela matrícula (Registro). Assim, os voos da mesma aeronave ficam agrupados
-                # e o usuário vê a coluna CATEGORIA_PBCS mudando de valor nas linhas vizinhas.
                 df_view = df_inconsistentes[colunas_presentes].sort_values(by=['REGISTRO', 'EOBD'])
                 
-                # Tabela de Detalhamento
+                # Atualizado para width='stretch'
                 st.dataframe(
                     df_view,
-                    use_container_width=True,
+                    width='stretch',
                     height=500,
                     hide_index=True
                 )
