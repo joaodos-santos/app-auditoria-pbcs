@@ -205,7 +205,7 @@ if iniciar_analise and arquivos_selecionados:
                     
                     fig.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
                     fig.update_layout(uniformtext_minsize=8, uniformtext_mode='hide')
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width='stretch')
                     
                 with colB:
                     st.dataframe(
