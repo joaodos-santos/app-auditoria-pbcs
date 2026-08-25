@@ -66,7 +66,6 @@ with st.sidebar:
         options=list(mapa_arquivos.keys()),        
     )
     
-    # Atualizado para width='stretch'
     iniciar_analise = st.button("🚀 Processar Auditoria", width='stretch', type="primary")
 
 # 3. Execução Principal
@@ -149,29 +148,24 @@ if iniciar_analise and arquivos_selecionados:
             with col2:
                 voos_fmt = f"{resultados['total_capacitados']:,}".replace(',', '.')
                 pct_voos = f"{resultados['porcentagem_voos']:.1f}%"
-                # Coloca a porcentagem ao lado do número, sem gerar a seta
                 st.metric("Voos PBCS Declarados", f"{voos_fmt} ({pct_voos})")
                 
             with col3:
                 frota_fmt = f"{resultados['frota_capacitada']:,}".replace(',', '.')
                 pct_frota = f"{resultados['pct_frota_cap']:.1f}%"
-                # Coloca a porcentagem ao lado do número, sem gerar a seta
                 st.metric("Frota Capacitada", f"{frota_fmt} ({pct_frota})")
             
             st.divider()
             
-            # --- NOVA SESSÃO: PROGRESSÃO MENSAL ---
             st.subheader("Progressão Mensal")
             st.markdown("<span style='font-size: 0.9em; color: gray;'>Acompanhamento mês a mês da adesão das companhias aéreas ao Datalink (PBCS).</span>", unsafe_allow_html=True)
             
             df_evo = resultados['evolucao_mensal']
             
             if not df_evo.empty:
-                # Criando máscaras de formatação no padrão brasileiro
                 formato_int = lambda x: f"{int(x):,}".replace(',', '.')
                 formato_pct = lambda x: f"{x:.1f}%"
                 
-                # Atualizado para width='stretch'
                 st.dataframe(
                     df_evo.style.format({
                         'Voos Efetivos': formato_int,
@@ -188,7 +182,7 @@ if iniciar_analise and arquivos_selecionados:
         # --- ABA 2: DESEMPENHO POR COMPANHIA ---
         with tab2:
             st.subheader("Análise Detalhada por Companhia Aérea")
-            # Atualizado para width='stretch'
+            df_cia = resultados['relatorio_cia']
             st.dataframe(df_cia.style.format(precision=1), width='stretch', height=500, hide_index=True)
             
         # --- ABA 3: RANKING DE NÃO CAPACITADAS ---
@@ -211,10 +205,9 @@ if iniciar_analise and arquivos_selecionados:
                     
                     fig.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
                     fig.update_layout(uniformtext_minsize=8, uniformtext_mode='hide')
-                    st.plotly_chart(fig, use_container_width=True) # Mantido conforme padrão de gráficos plotly no Streamlit
+                    st.plotly_chart(fig, use_container_width=True)
                     
                 with colB:
-                    # Atualizado para width='stretch'
                     st.dataframe(
                         df_ofensores[['AIRLINE', 'VOOS_NAO_CAPACITADOS', 'CONTRIBUICAO_PCT']].head(20).style.format({'CONTRIBUICAO_PCT': "{:.2f}%"}), 
                         width='stretch', 
@@ -237,7 +230,6 @@ if iniciar_analise and arquivos_selecionados:
                 st.warning(f"⚠️ ALERTA: {qtd_inconsistentes} aeronaves apresentaram flutuação de capacidade entre seus voos.")
                 
                 st.markdown("#### Top Aeronaves com Declarações Conflitantes")
-                # Atualizado para width='stretch'
                 st.dataframe(
                     ranking_inconsistentes,
                     width='stretch',
@@ -252,7 +244,6 @@ if iniciar_analise and arquivos_selecionados:
                 
                 df_view = df_inconsistentes[colunas_presentes].sort_values(by=['REGISTRO', 'EOBD'])
                 
-                # Atualizado para width='stretch'
                 st.dataframe(
                     df_view,
                     width='stretch',
