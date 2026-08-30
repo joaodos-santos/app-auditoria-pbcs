@@ -12,7 +12,7 @@ import src.auditoria_core as core
 # ==========================================
 # CONFIGURAÇÃO DE AMBIENTE (TESTE LOCAL VS PRODUÇÃO)
 # ==========================================
-MODO_LOCAL = True  # Mude para False para conectar ao Drive em produção
+MODO_LOCAL = False  # Mude para False para conectar ao Drive em produção
 PASTA_TESTE_LOCAL = "dados_teste"
 ID_PASTA_DRIVE = "1crkkDka7Q0t5i6-TDMybk6eSB0MAdenX"
 
