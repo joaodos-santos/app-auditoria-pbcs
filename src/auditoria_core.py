@@ -81,12 +81,27 @@ def processar_dados(df):
     porcentagem_voos = (total_capacitados / total_terminado) * 100 if total_terminado > 0 else 0
 
     # =========================================================================
-    # 5. ANÁLISE DE FROTA INTEGRADA
+    # 5. ANÁLISE DE FROTA INTEGRADA (CORRIGIDO COM TRAVA ICAO)
     # =========================================================================
     df_terminado['REG_EXTRAIDO'] = df_terminado['ADD_INFO'].str.extract(r'REG/([^\s]+)')
-    df_terminado['REGISTRO'] = df_terminado['REG_EXTRAIDO'].fillna(df_terminado['INDICATIVE'])
-    df_terminado['REGISTRO'] = df_terminado['REGISTRO'].str.replace(r'[^A-Z0-9]', '', regex=True)
+    
+    # 1. Identifica se o indicativo é comercial (3 letras ICAO + pelo menos 1 número)
+    mask_comercial = df_terminado['INDICATIVE'].str.match(r'^[A-Z]{3}[0-9][A-Z0-9]*$')
+    
+    # 2. Inicia o registro assumindo o que foi extraído da tag REG/
+    df_terminado['REGISTRO'] = df_terminado['REG_EXTRAIDO']
+    
+    # Verifica onde está nulo ou vazio
+    mask_sem_reg = df_terminado['REGISTRO'].isna() | (df_terminado['REGISTRO'] == '')
+    
+    # 3. Só substitui pelo INDICATIVE se NÃO tiver REG/ e NÃO for um voo comercial
+    df_terminado.loc[mask_sem_reg & ~mask_comercial, 'REGISTRO'] = df_terminado.loc[mask_sem_reg & ~mask_comercial, 'INDICATIVE']
 
+    # 4. Remove caracteres especiais apenas das linhas que possuem matrícula
+    mask_com_registro = df_terminado['REGISTRO'].notna() & (df_terminado['REGISTRO'] != '')
+    df_terminado.loc[mask_com_registro, 'REGISTRO'] = df_terminado.loc[mask_com_registro, 'REGISTRO'].astype(str).str.replace(r'[^A-Z0-9]', '', regex=True)
+
+    # O groupby do pandas ignora NaNs por padrão (dropna=True). Voos comerciais sem matrícula não afetarão a frota.
     frota_agrupada = df_terminado.groupby('REGISTRO')['IS_CAPABLE'].any()
     total_frota = len(frota_agrupada)
     frota_capacitada = frota_agrupada.sum()
