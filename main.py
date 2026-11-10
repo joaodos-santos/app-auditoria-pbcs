@@ -17,7 +17,7 @@ import src.auditoria_core as core
 # ==========================================
 # CONFIGURAÇÃO DE AMBIENTE
 # ==========================================
-MODO_LOCAL = True
+MODO_LOCAL = False
 PASTA_TESTE_LOCAL = "dados_teste"
 ID_PASTA_DRIVE = "1crkkDka7Q0t5i6-TDMybk6eSB0MAdenX"
 
