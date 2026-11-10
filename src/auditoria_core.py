@@ -53,11 +53,11 @@ def processar_dados(df):
         df_terminado['ID_VOO'] = df_terminado.index.astype(str)
 
     # =========================================================================
-    # 4. DIVISÃO EQUIP E CRIAÇÃO DAS MÁSCARAS
+    # 4. DIVISÃO EQUIP E CRIAÇÃO DAS MÁSCARAS (COM FALLBACK OACI PARA BUG DO SIGMA)
     # =========================================================================
-    split_equip = df_terminado['EQUIP'].str.split('/', n=1, expand=True)
     
-    # Blinda o código caso nenhum voo do mês possua a barra '/' na coluna EQUIP
+    # --- 4.1 TENTATIVA OFICIAL (VIA CAMPO 10 - EQUIP) ---
+    split_equip = df_terminado['EQUIP'].str.split('/', n=1, expand=True)
     if split_equip.shape[1] == 1:
         df_terminado['EQUIP_COM'] = split_equip[0].fillna('')
         df_terminado['EQUIP_SUR'] = ''
@@ -65,19 +65,43 @@ def processar_dados(df):
         df_terminado['EQUIP_COM'] = split_equip[0].fillna('')
         df_terminado['EQUIP_SUR'] = split_equip[1].fillna('')
 
-    cond_cpdlc = df_terminado['EQUIP_COM'].str.contains('J5|J7', regex=True)
-    cond_adsc  = df_terminado['EQUIP_SUR'].str.contains('D1', regex=False)
-    cond_adsb  = df_terminado['EQUIP_SUR'].str.contains('B1|B2', regex=True)
-    cond_rcp   = df_terminado['EQUIP_COM'].str.contains('P2', regex=False)
+    cond_cpdlc_eq = df_terminado['EQUIP_COM'].str.contains('J5|J7', regex=True)
+    cond_adsc_eq  = df_terminado['EQUIP_SUR'].str.contains('D1', regex=False)
+    cond_adsb_eq  = df_terminado['EQUIP_SUR'].str.contains('B1|B2', regex=True)
+    cond_rcp_eq   = df_terminado['EQUIP_COM'].str.contains('P2', regex=False)
+
+    # --- 4.2 LÓGICA DE RECUPERAÇÃO OACI (VIA CAMPO 18 - ADD_INFO) ---
+    # Expressão Regular isola os blocos ignorando espaços internos, parando apenas na próxima tag OACI
+    # O (?:(?!\s[A-Z0-9]{2,}/).) significa "capture qualquer coisa, a menos que seja um espaço seguido de TAG/"
+    regex_dat = r'DAT/((?:(?!\s[A-Z0-9]{2,}/).)*)'
+    regex_pbn = r'PBN/((?:(?!\s[A-Z0-9]{2,}/).)*)'
     
-    cond_rnp4  = df_terminado['ADD_INFO'].str.contains('L1', regex=False)
-    cond_rnp10 = df_terminado['ADD_INFO'].str.contains('A1', regex=False)
+    bloco_dat = df_terminado['ADD_INFO'].str.extract(regex_dat, expand=False).fillna('')
+    bloco_pbn = df_terminado['ADD_INFO'].str.extract(regex_pbn, expand=False).fillna('')
+    
+    # CPDLC e ADS-C só são buscados dentro do bloco restrito DAT/ para não fraudar outras partes
+    cond_cpdlc_add = bloco_dat.str.contains('CPDLC|FANS', regex=True)
+    cond_adsc_add  = bloco_dat.str.contains('FANS', regex=True)
+    cond_adsb_add  = df_terminado['ADD_INFO'].str.contains(r'SUR/.*260B', regex=True)
+    
+    # O RCP e o RSP podem aparecer de forma dispersa no final do RMK ou em SUR
+    cond_rcp_add   = df_terminado['ADD_INFO'].str.contains(r'RCP\s*240', regex=True)
+
+    # --- 4.3 COMBINAÇÃO MESTRA (Se veio no EQUIP = OK; Se veio recuperado no ADD = OK) ---
+    cond_cpdlc = cond_cpdlc_eq | cond_cpdlc_add
+    cond_adsc  = cond_adsc_eq | cond_adsc_add
+    cond_adsb  = cond_adsb_eq | cond_adsb_add
+    cond_rcp   = cond_rcp_eq | cond_rcp_add
+
+    # --- 4.4 REGRAS ESTÁTICAS DE RNP E RSP (Sempre no Campo 18) ---
+    # RNP4 e RNP10 restritos estritamente ao bloco PBN/. Isso impede que L1 signifique outra coisa no campo STS/
+    cond_rnp4  = bloco_pbn.str.contains('L1', regex=False)
+    cond_rnp10 = bloco_pbn.str.contains('A1', regex=False)
     cond_rsp   = df_terminado['ADD_INFO'].str.contains(r'RSP\s*180', regex=True)
     
-    # A nível de voo, a negação é direta: não tem RNP4 E não tem RNP10
     cond_nao_rnp = ~(cond_rnp4 | cond_rnp10)
 
-    # SALVANDO CARIMBOS (Estatística de Voos Individuais)
+    # SALVANDO CARIMBOS DE CAPACIDADE NA PLANILHA INTERNA
     df_terminado['CAP_CPDLC'] = cond_cpdlc
     df_terminado['CAP_ADSC']  = cond_adsc
     df_terminado['CAP_ADSB']  = cond_adsb
@@ -90,6 +114,7 @@ def processar_dados(df):
     mask_pbcs = cond_rcp & cond_rsp
     df_terminado['CAP_PBCS'] = mask_pbcs & (cond_rnp4 | cond_rnp10)
 
+    # CLASSIFICAÇÃO PARA TABELAS E RANKING
     df_terminado['CATEGORIA_PBCS'] = 'NAO_CAPACITADO'
     df_terminado.loc[mask_pbcs & cond_rnp4 & cond_rnp10, 'CATEGORIA_PBCS'] = 'PBCS RNP4 RNP10'
     df_terminado.loc[mask_pbcs & cond_rnp4 & ~cond_rnp10, 'CATEGORIA_PBCS'] = 'PBCS RNP4'
@@ -116,13 +141,10 @@ def processar_dados(df):
     frota_capacitada = frota_agrupada.sum()
     pct_frota_cap = (frota_capacitada / total_frota) * 100 if total_frota > 0 else 0
 
-    # --- [CORREÇÃO DA TABELA MESTRA DA FROTA (O PADRÃO OURO)] ---
-    # 1. Agrupamos apenas as capacidades positivas, onde se declarou 1 vez no período, já conta.
     df_frota_capacidades = df_terminado.groupby('REGISTRO')[
         ['CAP_RNP10', 'CAP_RNP4', 'CAP_CPDLC', 'CAP_ADSC', 'CAP_ADSB', 'CAP_RCP', 'CAP_RSP', 'CAP_PBCS']
     ].any().reset_index()
 
-    # 2. A aeronave SÓ entra no NÃO RNP da frota se não declarou RNP10 nem RNP4 no período inteiro.
     df_frota_capacidades['CAP_NAO_RNP'] = ~(df_frota_capacidades['CAP_RNP10'] | df_frota_capacidades['CAP_RNP4'])
 
     # =========================================================================
