@@ -55,7 +55,15 @@ def processar_dados(df):
     # =========================================================================
     # 4. DIVISÃO EQUIP E CRIAÇÃO DAS MÁSCARAS
     # =========================================================================
-    df_terminado[['EQUIP_COM', 'EQUIP_SUR']] = df_terminado['EQUIP'].str.split('/', n=1, expand=True).fillna('')
+    split_equip = df_terminado['EQUIP'].str.split('/', n=1, expand=True)
+    
+    # Blinda o código caso nenhum voo do mês possua a barra '/' na coluna EQUIP
+    if split_equip.shape[1] == 1:
+        df_terminado['EQUIP_COM'] = split_equip[0].fillna('')
+        df_terminado['EQUIP_SUR'] = ''
+    else:
+        df_terminado['EQUIP_COM'] = split_equip[0].fillna('')
+        df_terminado['EQUIP_SUR'] = split_equip[1].fillna('')
 
     cond_cpdlc = df_terminado['EQUIP_COM'].str.contains('J5|J7', regex=True)
     cond_adsc  = df_terminado['EQUIP_SUR'].str.contains('D1', regex=False)
